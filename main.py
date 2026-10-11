@@ -93,6 +93,7 @@ def main():
             env.render()
             draw_dashboard(env, font, episode, step, total_reward, epsilon)
             pygame.display.flip()
+            env.clock.tick(60)
             
             if done:
                 break

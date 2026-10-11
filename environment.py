@@ -58,6 +58,10 @@ class DroneSim:
         
     def step(self, action):
         """Takes an action and returns (state, reward, done)."""
+        # 1. Calculate distance before movement
+        prev_dist = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
+
+        # Action execution
         if action == 0:
             self.speed = min(self.speed + 0.5, self.max_speed)
         elif action == 1:
@@ -72,29 +76,36 @@ class DroneSim:
         
         self._cast_rays()
         
-        reward = -0.1 # Small penalty every step to encourage speed
+        # 2. Distance after movement
+        curr_dist = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
+        
+        # Base Step Penalty (-0.05) + Reward for moving closer to the goal
+        progress_reward = (prev_dist - curr_dist) * 0.1
+        reward = progress_reward - 0.05
         done = False
         
-        # 1. Wall Collision Penalty
-        if self.drone_x <= 0 or self.drone_x >= WIDTH or self.drone_y <= 0 or self.drone_y >= HEIGHT:
+        # 3. Wall Collision Penalty (accounting for drone radius 10)
+        drone_radius = 10
+        if (self.drone_x <= drone_radius or self.drone_x >= WIDTH - drone_radius or 
+            self.drone_y <= drone_radius or self.drone_y >= HEIGHT - drone_radius):
             reward = -100
             done = True
             
-        # 2. Obstacle Collision Penalty
-        # Create a tiny bounding box around the drone's center for collision checking
-        drone_rect = pygame.Rect(self.drone_x - 8, self.drone_y - 8, 16, 16)
+        # 4. Obstacle Collision Penalty (20x20 bounding box)
+        drone_rect = pygame.Rect(self.drone_x - 10, self.drone_y - 10, 20, 20)
         for obs in self.obstacles:
             if drone_rect.colliderect(obs):
                 reward = -100
                 done = True
+                break
                 
-        # 3. Goal Reached Reward
-        dist_to_goal = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
-        if dist_to_goal < 20: # If within 20 pixels of the goal center
+        # 5. Goal Reached Reward (distance < radius_goal + radius_drone)
+        if curr_dist < 25: 
             reward = 100
             done = True
             
         return self._get_state(), reward, done
+
         
     def _cast_rays(self):
         """Projects rays and calculates distance to nearest obstacles."""
@@ -178,9 +189,6 @@ class DroneSim:
         end_x = self.drone_x + 20 * math.cos(self.angle)
         end_y = self.drone_y + 20 * math.sin(self.angle)
         pygame.draw.line(self.screen, WHITE, drone_pos, (int(end_x), int(end_y)), 2)
-        
-        pygame.display.flip()
-        self.clock.tick(FPS)
 
 if __name__ == "__main__":
     env = DroneSim()
@@ -202,5 +210,7 @@ if __name__ == "__main__":
         
         env.step(action)
         env.render()
+        pygame.display.flip()
+        env.clock.tick(FPS)
         
     pygame.quit()
