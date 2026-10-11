@@ -84,11 +84,26 @@ class DQNAgent:
         loss.backward()
         self.optimizer.step()
 
-    def save(self, filepath):
-
-        torch.save(self.q_network.state_dict(), filepath)
+    def save(self, filepath, episode=0, epsilon=1.0):
+        checkpoint = {
+            "model_state_dict": self.q_network.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "episode": episode,
+            "epsilon": epsilon
+        }
+        torch.save(checkpoint, filepath)
 
     def load(self, filepath):
- 
-        self.q_network.load_state_dict(torch.load(filepath, map_location=self.device))
-        self.q_network.eval() 
+        checkpoint = torch.load(filepath, map_location=self.device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            self.q_network.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.q_network.train()
+            saved_episode = checkpoint.get("episode", 0)
+            saved_epsilon = checkpoint.get("epsilon", 0.2)
+            return saved_episode, saved_epsilon
+        else:
+            self.q_network.load_state_dict(checkpoint)
+            self.q_network.train()
+            return 0, 0.2 

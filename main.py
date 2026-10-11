@@ -5,11 +5,10 @@ from environment import DroneSim
 from dqn_agent import DQNAgent
 
 # Hyperparameters
-MAX_EPISODES = 1000
 MAX_STEPS = 500
 BATCH_SIZE = 64
 EPSILON_START = 1.0
-EPSILON_MIN = 0.05
+EPSILON_MIN = 0.01  # Minimum exploration rate (1% random, 99% learned policy)
 EPSILON_DECAY = 0.995
 MODEL_PATH = "drone_memory.pth"
 
@@ -23,9 +22,9 @@ def draw_dashboard(env, font, episode, step, reward, epsilon):
 
     # Text Metrics
     metrics = [
-        f"Episode: {episode} / {MAX_EPISODES}",
+        f"Episode: {episode} (Continuous)",
         f"Steps: {step} / {MAX_STEPS}",
-        f"Epsilon (Randomness): {epsilon:.2f}",
+        f"Epsilon (Random): {epsilon:.3f}",
         f"Current Reward: {reward:.1f}"
     ]
     
@@ -57,53 +56,62 @@ def main():
     
     agent = DQNAgent(state_size, action_size)
     
+    start_episode = 0
     # Induce Memory: Check if a trained model already exists
     if os.path.exists(MODEL_PATH):
-        agent.load(MODEL_PATH)
-        print("Successfully loaded previous drone memory!")
-        # Since it already knows how to fly, we reduce the random exploration rate significantly
-        epsilon = 0.20 
+        start_episode, epsilon = agent.load(MODEL_PATH)
+        print(f"Successfully loaded previous drone memory! Resuming from Episode {start_episode} (Epsilon: {epsilon:.3f})")
     else:
         print("No previous memory found. Starting from scratch.")
         epsilon = EPSILON_START
         
     font = pygame.font.SysFont("Consolas", 16)
-    
-    for episode in range(1, MAX_EPISODES + 1):
-        state = env.reset()
-        total_reward = 0
-        
-        for step in range(MAX_STEPS):
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    # Save before exiting manually
-                    agent.save(MODEL_PATH)
-                    pygame.quit()
-                    return
+    current_episode = start_episode
+
+    try:
+        episode = start_episode
+        while True:
+            episode += 1
+            current_episode = episode
+            state = env.reset()
+            total_reward = 0
             
-            action = agent.act(state, epsilon)
-            next_state, reward, done = env.step(action)
-            
-            agent.memory.push(state, action, reward, next_state, done)
-            agent.train_step(BATCH_SIZE)
-            
-            state = next_state
-            total_reward += reward
-            
-            env.render()
-            draw_dashboard(env, font, episode, step, total_reward, epsilon)
-            pygame.display.flip()
-            env.clock.tick(60)
-            
-            if done:
-                break
+            for step in range(MAX_STEPS):
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        # Save before exiting manually
+                        agent.save(MODEL_PATH, episode, epsilon)
+                        pygame.quit()
+                        return
                 
-        # Save memory automatically every 10 episodes
-        if episode % 10 == 0:
-            agent.save(MODEL_PATH)
-            
-        epsilon = max(EPSILON_MIN, epsilon * EPSILON_DECAY)
-        print(f"Episode {episode} | Reward: {total_reward:.1f} | Epsilon: {epsilon:.3f}")
+                action = agent.act(state, epsilon)
+                next_state, reward, done = env.step(action)
+                
+                agent.memory.push(state, action, reward, next_state, done)
+                agent.train_step(BATCH_SIZE)
+                
+                state = next_state
+                total_reward += reward
+                
+                env.render()
+                draw_dashboard(env, font, episode, step, total_reward, epsilon)
+                pygame.display.flip()
+                env.clock.tick(60)
+                
+                if done:
+                    break
+                    
+            # Save memory automatically every 10 episodes
+            if episode % 10 == 0:
+                agent.save(MODEL_PATH, episode, epsilon)
+                
+            epsilon = max(EPSILON_MIN, epsilon * EPSILON_DECAY)
+            print(f"Episode {episode} | Reward: {total_reward:.1f} | Epsilon: {epsilon:.3f}")
+
+    except KeyboardInterrupt:
+        print(f"\nTraining paused by user (Ctrl+C). Saving memory at Episode {current_episode}...")
+        agent.save(MODEL_PATH, current_episode, epsilon)
+        pygame.quit()
 
 if __name__ == "__main__":
     main()

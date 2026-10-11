@@ -4,7 +4,7 @@ import numpy as np
 import random
 
 # Constants
-WIDTH, HEIGHT = 800, 600
+WIDTH, HEIGHT = 800,100
 FPS = 60
 WHITE = (255, 255, 255)
 BLACK = (15, 15, 20)
