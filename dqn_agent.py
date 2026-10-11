@@ -83,3 +83,12 @@ class DQNAgent:
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+    def save(self, filepath):
+
+        torch.save(self.q_network.state_dict(), filepath)
+
+    def load(self, filepath):
+ 
+        self.q_network.load_state_dict(torch.load(filepath, map_location=self.device))
+        self.q_network.eval() 
