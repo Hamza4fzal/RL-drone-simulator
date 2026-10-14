@@ -5,7 +5,7 @@ import time
 import argparse
 import numpy as np
 from collections import deque
-from environment import DroneSim
+from environment import DroneSim, WIDTH, HEIGHT
 from dqn_agent import DQNAgent
 
 # Hyperparameters
@@ -24,18 +24,19 @@ MODE_HEADLESS = "HEADLESS"      # Windowed headless, maximum compute speed (~50x
 
 MODE_CYCLE = [MODE_NORMAL, MODE_TURBO, MODE_ULTRA]
 
-def draw_dashboard(env, font, small_font, episode, step, reward, epsilon, mode, steps_per_sec, win_rate):
+def draw_dashboard(env, font, episode, step, reward, epsilon, mode, steps_per_sec, win_rate):
     """Draws the UI metrics, speed indicator, and reward/penalty meter."""
     if env.screen is None:
         return
 
     # Semi-transparent background for UI
-    ui_width = 270
-    ui_height = 215
+    ui_width = 280
+    ui_height = 188
     ui_surface = pygame.Surface((ui_width, ui_height))
-    ui_surface.set_alpha(215)
-    ui_surface.fill((18, 20, 28))
+    ui_surface.set_alpha(220)
+    ui_surface.fill((16, 18, 26))
     env.screen.blit(ui_surface, (10, 10))
+    pygame.draw.rect(env.screen, (55, 68, 95), pygame.Rect(10, 10, ui_width, ui_height), width=1, border_radius=6)
 
     # Mode Badge Color
     mode_colors = {
@@ -60,12 +61,12 @@ def draw_dashboard(env, font, small_font, episode, step, reward, epsilon, mode, 
     
     for i, (text, color) in enumerate(metrics):
         surface = font.render(text, True, color)
-        env.screen.blit(surface, (20, 18 + (i * 20)))
+        env.screen.blit(surface, (20, 16 + (i * 20)))
 
     # Reward/Penalty Meter Visuals
-    meter_y = 168
-    center_x = 140
-    pygame.draw.line(env.screen, (80, 80, 95), (40, meter_y), (240, meter_y), 4) # Base line
+    meter_y = 166
+    center_x = 145
+    pygame.draw.line(env.screen, (80, 80, 95), (45, meter_y), (245, meter_y), 4) # Base line
     pygame.draw.line(env.screen, (255, 255, 255), (center_x, meter_y - 7), (center_x, meter_y + 7), 2) # Center zero
     
     bar_length = min(abs(reward), 95)
@@ -74,12 +75,45 @@ def draw_dashboard(env, font, small_font, episode, step, reward, epsilon, mode, 
     elif reward < 0:
         pygame.draw.rect(env.screen, (255, 60, 60), (center_x - bar_length, meter_y - 4, bar_length, 8))
 
-    # Controls guide footer
-    guide_text = "[T] Turbo  [H] Headless  [Space] Pause"
-    guide_surface = small_font.render(guide_text, True, (160, 160, 180))
-    env.screen.blit(guide_surface, (20, 188))
+def draw_controls_bar(env, small_font, tiny_font):
+    """Draws a dedicated controls and shortcuts reference dock on the screen."""
+    if env.screen is None:
+        return
+        
+    bar_width = WIDTH - 20 # 630 px
+    bar_height = 118
+    bar_x = 10
+    bar_y = HEIGHT - bar_height - 10 # 850 - 118 - 10 = 722
+    
+    panel = pygame.Surface((bar_width, bar_height))
+    panel.set_alpha(225)
+    panel.fill((16, 18, 26))
+    env.screen.blit(panel, (bar_x, bar_y))
+    
+    # Outer frame border
+    pygame.draw.rect(env.screen, (55, 70, 100), pygame.Rect(bar_x, bar_y, bar_width, bar_height), width=1, border_radius=6)
+    
+    # Header
+    title = small_font.render("SIMULATOR CONTROLS & SHORTCUTS", True, (255, 205, 80))
+    env.screen.blit(title, (bar_x + 14, bar_y + 7))
+    
+    shortcuts = [
+        ("[T]", "Cycle visual speed modes (NORMAL -> TURBO -> ULTRA TURBO).", (255, 200, 50)),
+        ("[H]", "Toggle HEADLESS accelerated mode on and off instantly without freezing the window.", (255, 90, 180)),
+        ("[SPACE]", "Pause and resume training.", (100, 240, 255)),
+        ("[S]", "Manually save the model checkpoint to drone_memory.pth.", (130, 255, 130)),
+        ("[Q] / [ESC]", "Save and cleanly exit.", (255, 120, 120))
+    ]
+    
+    y = bar_y + 26
+    for key_tag, desc, tag_color in shortcuts:
+        k_surf = tiny_font.render(key_tag, True, tag_color)
+        d_surf = tiny_font.render(f": {desc}", True, (225, 225, 235))
+        env.screen.blit(k_surf, (bar_x + 14, y))
+        env.screen.blit(d_surf, (bar_x + 105, y))
+        y += 17
 
-def draw_headless_screen(env, font, small_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False):
+def draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False):
     """Draws a high-contrast HUD screen when running in windowed headless mode."""
     if env.screen is None:
         return
@@ -90,37 +124,47 @@ def draw_headless_screen(env, font, small_font, episode, step, epsilon, steps_pe
     status_str = "PAUSED" if paused else "ACTIVE (MAX THROUGHPUT)"
     status_color = (255, 100, 100) if paused else (80, 255, 120)
     
-    box_rect = pygame.Rect(75, 220, 500, 380)
-    pygame.draw.rect(env.screen, (22, 26, 36), box_rect, border_radius=12)
+    box_rect = pygame.Rect(35, 160, 580, 480)
+    pygame.draw.rect(env.screen, (20, 24, 34), box_rect, border_radius=12)
     pygame.draw.rect(env.screen, (60, 75, 105), box_rect, width=2, border_radius=12)
     
     title = font.render("=== HEADLESS ULTRA-SPEED TRAINING ===", True, (255, 200, 80))
-    env.screen.blit(title, (box_rect.x + 40, box_rect.y + 25))
+    env.screen.blit(title, (box_rect.x + 55, box_rect.y + 22))
     
-    lines = [
+    metrics = [
         (f"Status: {status_str}", status_color),
         (f"Throughput: {steps_per_sec:.0f} steps/sec ({speed_mult:.1f}x Realtime)", (100, 230, 255)),
         (f"Current Episode: {episode}", (240, 240, 240)),
         (f"Step: {step} / {MAX_STEPS}", (240, 240, 240)),
         (f"Epsilon: {epsilon:.3f}", (240, 240, 240)),
         (f"Recent Success Rate: {win_rate:.0f}%", (255, 220, 120)),
-        ("", (0, 0, 0)),
-        ("Hotkeys:", (180, 180, 180)),
-        ("  [H] Exit Headless & return to live visual mode", (200, 200, 200)),
-        ("  [T] Switch directly to Turbo visual mode", (200, 200, 200)),
-        ("  [Space] Pause / Resume simulation", (200, 200, 200)),
-        ("  [S] Save model checkpoint", (200, 200, 200)),
-        ("  [Q] / [ESC] Save checkpoint & exit cleanly", (200, 200, 200))
     ]
     
-    y = box_rect.y + 65
-    for text, color in lines:
-        if not text:
-            y += 8
-            continue
+    y = box_rect.y + 58
+    for text, color in metrics:
         surf = small_font.render(text, True, color)
         env.screen.blit(surf, (box_rect.x + 35, y))
-        y += 20
+        y += 22
+        
+    y += 10
+    head_surf = small_font.render("CONTROLS & SHORTCUTS:", True, (255, 205, 80))
+    env.screen.blit(head_surf, (box_rect.x + 35, y))
+    y += 26
+    
+    shortcuts = [
+        ("[T]", "Cycle visual speed modes (NORMAL -> TURBO -> ULTRA TURBO).", (255, 200, 50)),
+        ("[H]", "Toggle HEADLESS accelerated mode on and off instantly without freezing the window.", (255, 90, 180)),
+        ("[SPACE]", "Pause and resume training.", (100, 240, 255)),
+        ("[S]", "Manually save the model checkpoint to drone_memory.pth.", (130, 255, 130)),
+        ("[Q] / [ESC]", "Save and cleanly exit.", (255, 120, 120))
+    ]
+    
+    for key_tag, desc, tag_color in shortcuts:
+        k_surf = tiny_font.render(key_tag, True, tag_color)
+        d_surf = tiny_font.render(f": {desc}", True, (220, 225, 235))
+        env.screen.blit(k_surf, (box_rect.x + 35, y))
+        env.screen.blit(d_surf, (box_rect.x + 130, y))
+        y += 22
         
     pygame.display.flip()
 
@@ -165,9 +209,11 @@ def main():
         
     font = None
     small_font = None
+    tiny_font = None
     if render_mode:
         font = pygame.font.SysFont("Consolas", 15, bold=True)
         small_font = pygame.font.SysFont("Consolas", 13)
+        tiny_font = pygame.font.SysFont("Consolas", 11)
         
     current_episode = start_episode
     paused = False
@@ -233,13 +279,14 @@ def main():
                 # Handle Pause loop
                 while paused:
                     if render_mode:
+                        win_rate = (sum(recent_outcomes) / len(recent_outcomes) * 100) if recent_outcomes else 0
                         if mode == MODE_HEADLESS:
-                            draw_headless_screen(env, font, small_font, episode, step, epsilon, steps_per_sec, 
-                                                 (sum(recent_outcomes) / len(recent_outcomes) * 100) if recent_outcomes else 0, paused=True)
+                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, 
+                                                 win_rate, paused=True)
                         else:
                             env.render()
-                            win_rate = (sum(recent_outcomes) / len(recent_outcomes) * 100) if recent_outcomes else 0
-                            draw_dashboard(env, font, small_font, episode, step, total_reward, epsilon, "PAUSED", 0, win_rate)
+                            draw_dashboard(env, font, episode, step, total_reward, epsilon, "PAUSED", 0, win_rate)
+                            draw_controls_bar(env, small_font, tiny_font)
                             pygame.display.flip()
                         
                         for event in pygame.event.get():
@@ -286,29 +333,31 @@ def main():
                     
                     if mode == MODE_NORMAL:
                         env.render()
-                        draw_dashboard(env, font, small_font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_controls_bar(env, small_font, tiny_font)
                         pygame.display.flip()
                         env.clock.tick(60) # Capped at 60 FPS
                         
                     elif mode == MODE_TURBO:
                         env.render()
-                        draw_dashboard(env, font, small_font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_controls_bar(env, small_font, tiny_font)
                         pygame.display.flip()
-                        # Uncapped or minimal tick to yield CPU slice
                         env.clock.tick(0)
                         
                     elif mode == MODE_ULTRA:
                         # Render only 1 out of every N steps (or at episode end) for massive speedup
                         if step % render_interval == 0 or done:
                             env.render()
-                            draw_dashboard(env, font, small_font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                            draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                            draw_controls_bar(env, small_font, tiny_font)
                             pygame.display.flip()
                         env.clock.tick(0)
                         
                     elif mode == MODE_HEADLESS:
                         # Refresh headless HUD screen periodically without ray/obstacle drawing
                         if step % 25 == 0 or done:
-                            draw_headless_screen(env, font, small_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False)
+                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False)
                         env.clock.tick(0)
 
                 if done:
