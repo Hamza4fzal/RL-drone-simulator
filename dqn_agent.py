@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 import random
+import os
 from collections import deque
 
 class QNetwork(nn.Module):
@@ -94,16 +95,28 @@ class DQNAgent:
         torch.save(checkpoint, filepath)
 
     def load(self, filepath):
-        checkpoint = torch.load(filepath, map_location=self.device)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            self.q_network.load_state_dict(checkpoint["model_state_dict"])
-            if "optimizer_state_dict" in checkpoint:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            self.q_network.train()
-            saved_episode = checkpoint.get("episode", 0)
-            saved_epsilon = checkpoint.get("epsilon", 0.2)
-            return saved_episode, saved_epsilon
-        else:
-            self.q_network.load_state_dict(checkpoint)
-            self.q_network.train()
-            return 0, 0.2 
+        if not os.path.exists(filepath):
+            return 0, 1.0
+        try:
+            checkpoint = torch.load(filepath, map_location=self.device)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                saved_state_size = checkpoint["model_state_dict"]["fc1.weight"].shape[1]
+                if saved_state_size != self.state_size:
+                    print(f"[Notice] Checkpoint state_size ({saved_state_size}) does not match current model state_size ({self.state_size}).")
+                    print(f"[Notice] Initializing fresh policy for the updated {self.state_size}-dimensional state space.")
+                    return 0, 1.0
+                self.q_network.load_state_dict(checkpoint["model_state_dict"])
+                if "optimizer_state_dict" in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                self.q_network.train()
+                saved_episode = checkpoint.get("episode", 0)
+                saved_epsilon = checkpoint.get("epsilon", 0.2)
+                return saved_episode, saved_epsilon
+            else:
+                self.q_network.load_state_dict(checkpoint)
+                self.q_network.train()
+                return 0, 0.2
+        except Exception as e:
+            print(f"[Warning] Could not load checkpoint from '{filepath}': {e}")
+            print(f"[Notice] Initializing fresh policy.")
+            return 0, 1.0 

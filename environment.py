@@ -4,7 +4,7 @@ import numpy as np
 import random
 
 # Constants
-WIDTH, HEIGHT = 800,100
+WIDTH, HEIGHT = 650,850
 FPS = 60
 WHITE = (255, 255, 255)
 BLACK = (15, 15, 20)
@@ -15,16 +15,19 @@ RAY_COLOR = (50, 100, 255, 100) # Semi-transparent
 COLLISION_COLOR = (255, 50, 50)
 
 class DroneSim:
-    def __init__(self):
-        pygame.init()
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("UAV RL Navigation Simulator - Phase 2")
-        self.clock = pygame.time.Clock()
-        
-        # Sensor Configuration
-        self.num_rays = 9
-        self.ray_spread = math.pi # 180 degrees field of view
+    def __init__(self, render_mode=True, num_rays=16, ray_spread=2 * math.pi):
+        self.render_mode = render_mode
+        self.num_rays = num_rays
+        self.ray_spread = ray_spread # 360 degrees field of view (2 * pi)
         self.max_ray_length = 150
+        
+        self.screen = None
+        self.clock = None
+        if self.render_mode:
+            pygame.init()
+            self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+            pygame.display.set_caption("UAV RL Navigation Simulator - 360° Perception")
+            self.clock = pygame.time.Clock()
         
         self.reset()
         
@@ -53,6 +56,7 @@ class DroneSim:
         self._generate_obstacles()
         self.sensor_distances = [self.max_ray_length] * self.num_rays
         self.ray_hit_points = []
+        self._cast_rays()
         
         return self._get_state()
         
@@ -112,8 +116,13 @@ class DroneSim:
         self.sensor_distances = []
         self.ray_hit_points = []
         
-        start_angle = self.angle - (self.ray_spread / 2)
-        angle_step = self.ray_spread / (self.num_rays - 1)
+        # If full 360-degree FOV, divide evenly by num_rays so ray 0 and last ray don't duplicate
+        if math.isclose(self.ray_spread, 2 * math.pi, rel_tol=1e-3):
+            angle_step = self.ray_spread / self.num_rays
+            start_angle = self.angle  # Ray 0 points directly in drone heading direction
+        else:
+            angle_step = self.ray_spread / (self.num_rays - 1)
+            start_angle = self.angle - (self.ray_spread / 2)
         
         for i in range(self.num_rays):
             current_angle = start_angle + (i * angle_step)
@@ -165,6 +174,9 @@ class DroneSim:
         return np.array(state, dtype=np.float32)
         
     def render(self):
+        if self.screen is None:
+            return
+            
         self.screen.fill(BLACK)
         
         # Draw Goal
@@ -176,9 +188,10 @@ class DroneSim:
             
         # Draw Sensor Rays
         drone_pos = (int(self.drone_x), int(self.drone_y))
-        for pt in self.ray_hit_points:
-            # Draw the faint blue beam
-            pygame.draw.line(self.screen, RAY_COLOR, drone_pos, (int(pt[0]), int(pt[1])), 1)
+        for i, pt in enumerate(self.ray_hit_points):
+            # Highlight forward-facing ray (index 0) with brighter cyan
+            beam_color = (120, 230, 255) if i == 0 else RAY_COLOR
+            pygame.draw.line(self.screen, beam_color, drone_pos, (int(pt[0]), int(pt[1])), 1)
             # Draw the red dot at the collision point
             pygame.draw.circle(self.screen, COLLISION_COLOR, (int(pt[0]), int(pt[1])), 3)
         
@@ -203,12 +216,16 @@ if __name__ == "__main__":
                 env.reset()
         
         keys = pygame.key.get_pressed()
-        action = 3 
+        action = None
         if keys[pygame.K_w]: action = 0
-        if keys[pygame.K_a]: action = 1
-        if keys[pygame.K_d]: action = 2
+        elif keys[pygame.K_a]: action = 1
+        elif keys[pygame.K_d]: action = 2
+        elif keys[pygame.K_s]: action = 3
         
-        env.step(action)
+        if action is not None:
+            env.step(action)
+        else:
+            env.step(3) # Coast/decelerate if no key is pressed
         env.render()
         pygame.display.flip()
         env.clock.tick(FPS)
