@@ -276,14 +276,15 @@ class SACAgent:
             "alpha_loss": alpha_loss_val
         }
 
-    def save(self, filepath, episode=0):
+    def save(self, filepath, episode=0, total_goals=0):
         checkpoint = {
             "actor_state_dict": self.actor.state_dict(),
             "critic_state_dict": self.critic.state_dict(),
             "critic_target_state_dict": self.critic_target.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
-            "episode": episode
+            "episode": episode,
+            "total_goals": total_goals
         }
         if self.auto_entropy:
             checkpoint["log_alpha"] = self.log_alpha
@@ -292,7 +293,7 @@ class SACAgent:
 
     def load(self, filepath):
         if not os.path.exists(filepath):
-            return 0
+            return 0, 0
         try:
             checkpoint = torch.load(filepath, map_location=self.device)
             self.actor.load_state_dict(checkpoint["actor_state_dict"])
@@ -306,7 +307,8 @@ class SACAgent:
                 if "alpha_optimizer" in checkpoint:
                     self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
             saved_episode = checkpoint.get("episode", 0)
-            return saved_episode
+            saved_goals = checkpoint.get("total_goals", 0)
+            return saved_episode, saved_goals
         except Exception as e:
             print(f"[Warning] Could not load SAC checkpoint from '{filepath}': {e}")
-            return 0
+            return 0, 0
