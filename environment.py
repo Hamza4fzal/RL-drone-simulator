@@ -4,7 +4,7 @@ import numpy as np
 import random
 
 # Constants
-WIDTH, HEIGHT = 650, 850
+WIDTH, HEIGHT = 700, 850
 FPS = 60
 WHITE = (255, 255, 255)
 BLACK = (15, 15, 20)
@@ -15,7 +15,7 @@ RAY_COLOR = (50, 100, 255, 100) # Semi-transparent
 COLLISION_COLOR = (255, 50, 50)
 
 class DroneSim:
-    def __init__(self, render_mode=True, num_rays=16, ray_spread=2 * math.pi):
+    def __init__(self, render_mode=True, num_rays=16, ray_spread=2 * math.pi, enable_weather=True):
         self.render_mode = render_mode
         self.num_rays = num_rays
         self.ray_spread = ray_spread # 360 degrees field of view (2 * pi)
@@ -24,6 +24,39 @@ class DroneSim:
         self.screen = None
         self.clock = None
         self.frame_count = 0 # Animation ticker
+        
+        # ─────── Realistic Environmental Weather System ───────
+        # Real-world scale: 1 pixel ≈ 0.05 meters
+        # Arena ≈ 32.5m × 42.5m | Drone max speed ≈ 15 m/s
+        self.METERS_PER_PIXEL = 0.05
+        self.enable_weather = enable_weather
+
+        # Aerodynamic drag coefficient (absorbs 0.5·ρ·Cd·A/m)
+        # Calibrated for ~1.5 kg quadrotor: ρ=1.225, Cd≈1.1, A≈0.04 m²
+        self.aero_drag_coeff = 0.05
+
+        # Wind state variables
+        self.wind_speed = 0.0              # Base wind magnitude (px/step)
+        self.wind_angle = 0.0              # Wind direction (radians)
+        self.wind_angle_drift_rate = 0.0   # Atmospheric directional meander (rad/step)
+        self.beaufort_scale = 0            # Beaufort category (1-5) for telemetry
+        self.turbulence_intensity = 0.0    # O-U volatility (scales with mean wind)
+        self.gust_x = 0.0                 # Ornstein-Uhlenbeck stochastic gust X
+        self.gust_y = 0.0                 # Ornstein-Uhlenbeck stochastic gust Y
+        self.current_wind_x = 0.0         # Net wind vector X (base + gust)
+        self.current_wind_y = 0.0         # Net wind vector Y (base + gust)
+
+        # Rain state variables
+        self.rain_rate_mmh = 0.0           # Meteorological rain rate (mm/h)
+        self.rain_intensity = 0.0          # Normalized 0-1 for rendering
+        
+        # Rain particle system (x, y, fall_speed, length)
+        self.rain_drops = [
+            [random.randint(-40, WIDTH + 40), random.randint(0, HEIGHT),
+             random.uniform(10, 16), random.uniform(8, 14)]
+            for _ in range(110)
+        ]
+
         if self.render_mode:
             pygame.init()
             self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -65,6 +98,70 @@ class DroneSim:
         # Fixed goal position for now
         self.goal_x = WIDTH - 50.0
         self.goal_y = HEIGHT // 2
+
+        # ──── Weather Domain Randomization (Beaufort-Scale Calibrated) ────
+        # Each episode samples random weather for robust sim-to-real transfer
+        if self.enable_weather:
+            # Beaufort scale sampling (1-5): Light Air → Fresh Breeze
+            # Weighted toward moderate; BF5 is max safe for small UAVs
+            self.beaufort_scale = random.choices(
+                [1, 2, 3, 4, 5],
+                weights=[0.10, 0.25, 0.30, 0.25, 0.10]
+            )[0]
+            
+            # Beaufort → m/s mapping (WMO meteorological standard)
+            beaufort_speeds = {
+                1: (0.5, 1.5),    # Light air: smoke drifts
+                2: (1.6, 3.3),    # Light breeze: leaves rustle
+                3: (3.4, 5.4),    # Gentle breeze: flags extend
+                4: (5.5, 7.9),    # Moderate breeze: dust blows
+                5: (8.0, 10.7)    # Fresh breeze: small trees sway
+            }
+            lo, hi = beaufort_speeds[self.beaufort_scale]
+            wind_ms = random.uniform(lo, hi)
+            # Convert m/s → px/step: 1 m/s ≈ 0.333 px/step
+            self.wind_speed = wind_ms / (self.METERS_PER_PIXEL * FPS)
+            
+            self.wind_angle = random.uniform(0, 2 * math.pi)
+            # Real wind slowly shifts direction (atmospheric meander)
+            self.wind_angle_drift_rate = random.uniform(-0.003, 0.003)
+            
+            # Turbulence intensity: 10-25% of mean wind speed
+            # Higher values simulate urban canyon / terrain-induced turbulence
+            self.turbulence_intensity = random.uniform(0.10, 0.25) * self.wind_speed
+            self.gust_x = 0.0
+            self.gust_y = 0.0
+            
+            # Rain rate sampling (mm/h) — meteorological categories
+            if random.random() < 0.60:
+                rain_cat = random.choices(
+                    ['light', 'moderate', 'heavy'],
+                    weights=[0.45, 0.35, 0.20]
+                )[0]
+                rain_ranges = {
+                    'light':    (0.5, 2.5),     # Drizzle to light rain
+                    'moderate': (2.5, 7.5),     # Steady rain
+                    'heavy':    (7.5, 30.0)     # Downpour (max safe UAV ops)
+                }
+                lo, hi = rain_ranges[rain_cat]
+                self.rain_rate_mmh = random.uniform(lo, hi)
+                self.rain_intensity = min(1.0, self.rain_rate_mmh / 30.0)
+            else:
+                self.rain_rate_mmh = 0.0
+                self.rain_intensity = 0.0
+        else:
+            self.wind_speed = 0.0
+            self.wind_angle = 0.0
+            self.wind_angle_drift_rate = 0.0
+            self.beaufort_scale = 0
+            self.turbulence_intensity = 0.0
+            self.gust_x = 0.0
+            self.gust_y = 0.0
+            self.rain_rate_mmh = 0.0
+            self.rain_intensity = 0.0
+
+        self.current_wind_x = self.wind_speed * math.cos(self.wind_angle)
+        self.current_wind_y = self.wind_speed * math.sin(self.wind_angle)
         
         self._generate_obstacles()
         self.sensor_distances = [self.max_ray_length] * self.num_rays
@@ -78,11 +175,36 @@ class DroneSim:
         Takes an action and returns (state, reward, done).
         Supports both continuous SAC actions [throttle, steer] in [-1, 1]
         and legacy discrete integer actions (0, 1, 2, 3).
+        Simulates aerodynamic crosswind drift, stochastic gusts, and rain drag.
         """
         self.frame_count += 1
         
         # 1. Calculate distance before movement
         prev_dist = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
+
+        # ──── Realistic Wind Dynamics ────
+        if self.enable_weather:
+            # Wind direction slowly meanders (real atmospheric drift)
+            self.wind_angle += self.wind_angle_drift_rate
+            self.wind_angle += float(np.random.normal(0, 0.001))
+            
+            # Ornstein-Uhlenbeck turbulent gust process
+            # θ=0.92 (mean reversion), σ scales with turbulence intensity
+            ou_theta = 0.92
+            self.gust_x = ou_theta * self.gust_x + float(np.random.normal(0, self.turbulence_intensity * 0.3))
+            self.gust_y = ou_theta * self.gust_y + float(np.random.normal(0, self.turbulence_intensity * 0.3))
+            
+            # Net wind = laminar base flow + stochastic turbulent gusts
+            self.current_wind_x = self.wind_speed * math.cos(self.wind_angle) + self.gust_x
+            self.current_wind_y = self.wind_speed * math.sin(self.wind_angle) + self.gust_y
+        else:
+            self.current_wind_x = 0.0
+            self.current_wind_y = 0.0
+
+        # Rain thrust degradation (propeller efficiency + water mass accumulation)
+        # Research: combined 0-17% thrust loss from 0-30 mm/h rain
+        rain_norm = min(1.0, self.rain_rate_mmh / 30.0) if self.enable_weather else 0.0
+        throttle_eff = 1.0 - rain_norm * 0.17
 
         # Handle continuous vs discrete action
         if isinstance(action, (list, tuple, np.ndarray)):
@@ -92,7 +214,7 @@ class DroneSim:
 
             # Continuous Throttle: positive accelerates, negative brakes
             if throttle > 0:
-                self.speed = min(self.speed + throttle * 0.4, self.max_speed)
+                self.speed = min(self.speed + throttle * 0.4 * throttle_eff, self.max_speed)
             else:
                 self.speed = max(self.speed + throttle * 0.3, 0.0)
 
@@ -101,17 +223,49 @@ class DroneSim:
         else:
             # Legacy Discrete action execution (for keyboard testing)
             if action == 0:
-                self.speed = min(self.speed + 0.5, self.max_speed)
+                self.speed = min(self.speed + 0.5 * throttle_eff, self.max_speed)
             elif action == 1:
                 self.angle -= 0.1
             elif action == 2:
                 self.angle += 0.1
             elif action == 3:
                 self.speed = max(self.speed - 0.2, 0.0)
-            
-        # Update drone position
-        self.drone_x += self.speed * math.cos(self.angle)
-        self.drone_y += self.speed * math.sin(self.angle)
+
+        # ──── Quadratic Aerodynamic Drag Model ────
+        # Real physics: F_drag = 0.5 · ρ · Cd · A · |v_rel|² · v̂_rel
+        # v_rel = wind velocity − drone velocity (relative airspeed)
+        v_thrust_x = self.speed * math.cos(self.angle)
+        v_thrust_y = self.speed * math.sin(self.angle)
+        
+        rel_vx = self.current_wind_x - v_thrust_x
+        rel_vy = self.current_wind_y - v_thrust_y
+        rel_speed = math.hypot(rel_vx, rel_vy)
+        
+        # Quadratic drag: displacement ∝ |v_rel| · v_rel (preserves direction, v²-scaling)
+        aero_dx = self.aero_drag_coeff * rel_speed * rel_vx
+        aero_dy = self.aero_drag_coeff * rel_speed * rel_vy
+        
+        # Crosswind yaw torque — perpendicular wind component rotates fuselage
+        # Real drones must actively counter this with yaw-axis PID control
+        cross_wind = -self.current_wind_x * math.sin(self.angle) + self.current_wind_y * math.cos(self.angle)
+        yaw_torque = 0.004 * cross_wind * abs(cross_wind)
+        self.angle += yaw_torque
+        
+        self.drone_x += v_thrust_x + aero_dx
+        self.drone_y += v_thrust_y + aero_dy
+
+        # Update rain particles
+        if self.rain_intensity > 0:
+            for drop in self.rain_drops:
+                drop[0] += self.current_wind_x * 2.2
+                drop[1] += drop[2]
+                if drop[1] > HEIGHT:
+                    drop[1] = random.randint(-25, -5)
+                    drop[0] = random.randint(-40, WIDTH + 40)
+                if drop[0] < -40:
+                    drop[0] = WIDTH + 30
+                elif drop[0] > WIDTH + 40:
+                    drop[0] = -30
         
         self._cast_rays()
         
@@ -156,7 +310,7 @@ class DroneSim:
 
         
     def _cast_rays(self):
-        """Projects rays and calculates distance to nearest obstacles."""
+        """Projects rays and calculates distance to nearest obstacles with optical rain backscatter."""
         self.sensor_distances = []
         self.ray_hit_points = []
         
@@ -197,6 +351,23 @@ class DroneSim:
                 if dist < closest_dist:
                     closest_dist = dist
                     closest_point = (hit_x, hit_y)
+            
+            # ──── Beer-Lambert Optical Attenuation + Rain Noise Model ────
+            if self.rain_rate_mmh > 0.5:
+                # Beer-Lambert: LiDAR range degrades exponentially with rain rate
+                # α ≈ 0.003/mm·h for short-range 905nm LiDAR
+                attenuation = math.exp(-0.003 * self.rain_rate_mmh)
+                effective_max = self.max_ray_length * max(0.5, attenuation)
+                closest_dist = min(closest_dist, effective_max)
+                
+                # Gaussian measurement noise from rain backscatter (σ ∝ rain rate)
+                noise_sigma = (self.rain_rate_mmh / 30.0) * 2.5
+                noise = float(np.random.normal(0, noise_sigma))
+                closest_dist = max(5.0, min(effective_max, closest_dist + noise))
+                
+                # Stochastic false return from dense droplet cluster
+                if random.random() < (self.rain_rate_mmh / 30.0) * 0.025:
+                    closest_dist = min(closest_dist, random.uniform(25.0, effective_max * 0.7))
             
             self.sensor_distances.append(closest_dist)
             self.ray_hit_points.append(closest_point)
@@ -438,8 +609,96 @@ class DroneSim:
             hit_r = min(255, int(150 + proximity * 105))
             pygame.draw.circle(self.screen, (hit_r, 50, 50), hit_pt, dot_size)
 
+    def _draw_rain(self):
+        """Draws falling rain particles tilted according to net horizontal wind."""
+        if not self.enable_weather or self.rain_intensity <= 0.05 or self.screen is None:
+            return
+
+        slant_x = self.current_wind_x * 2.8
+
+        for x, y, speed, length in self.rain_drops:
+            x1 = int(x)
+            y1 = int(y)
+            x2 = int(x + slant_x)
+            y2 = int(y + length)
+            pygame.draw.line(self.screen, (170, 205, 255), (x1, y1), (x2, y2), 1)
+
+    def _draw_weather_widget(self):
+        """Draws a compact weather telemetry badge with Beaufort scale, m/s wind, and mm/h rain."""
+        if not self.enable_weather or self.screen is None:
+            return
+
+        box_w, box_h = 175, 84
+        bx = WIDTH - box_w - 10
+        by = 10
+
+        # Background badge
+        panel = pygame.Surface((box_w, box_h))
+        panel.set_alpha(215)
+        panel.fill((16, 20, 28))
+        self.screen.blit(panel, (bx, by))
+        pygame.draw.rect(self.screen, (50, 70, 100), pygame.Rect(bx, by, box_w, box_h), width=1, border_radius=6)
+
+        # Wind Compass Circle
+        cx, cy = bx + 26, by + 42
+        pygame.draw.circle(self.screen, (30, 40, 55), (cx, cy), 18)
+        pygame.draw.circle(self.screen, (65, 85, 115), (cx, cy), 18, 1)
+
+        # Wind Arrow (length scales with magnitude)
+        net_wind = math.hypot(self.current_wind_x, self.current_wind_y)
+        wind_dir = math.atan2(self.current_wind_y, self.current_wind_x)
+        arrow_len = min(14, int(6 + net_wind * 4))
+        ax = cx + arrow_len * math.cos(wind_dir)
+        ay = cy + arrow_len * math.sin(wind_dir)
+        pygame.draw.line(self.screen, (0, 240, 255), (cx, cy), (int(ax), int(ay)), 2)
+        pygame.draw.circle(self.screen, (0, 240, 255), (int(ax), int(ay)), 2)
+
+        # HUD Font
+        if not pygame.font.get_init():
+            pygame.font.init()
+        if not hasattr(self, '_hud_font') or self._hud_font is None:
+            self._hud_font = pygame.font.SysFont("Consolas", 10, bold=True)
+
+        # Wind: Beaufort scale + m/s
+        wind_ms = net_wind * self.METERS_PER_PIXEL * FPS
+        bf_names = {0: "Calm", 1: "Light", 2: "Lt Brz", 3: "Gentle", 4: "Mod", 5: "Fresh"}
+        bf_name = bf_names.get(self.beaufort_scale, "?")
+        w_text = f"BF{self.beaufort_scale} {bf_name}: {wind_ms:.1f}m/s"
+        
+        # Rain: mm/h with category label
+        if self.rain_rate_mmh > 0.5:
+            if self.rain_rate_mmh <= 2.5:
+                r_text = f"RAIN: {self.rain_rate_mmh:.1f}mm/h (Lt)"
+                r_color = (140, 200, 255)
+            elif self.rain_rate_mmh <= 7.5:
+                r_text = f"RAIN: {self.rain_rate_mmh:.1f}mm/h (Mod)"
+                r_color = (180, 180, 255)
+            else:
+                r_text = f"RAIN: {self.rain_rate_mmh:.1f}mm/h (Hvy)"
+                r_color = (255, 160, 120)
+        else:
+            r_text = "RAIN: 0.0mm/h (Dry)"
+            r_color = (120, 255, 150)
+
+        # LiDAR sensor range indicator
+        if self.rain_rate_mmh > 0.5:
+            attn_pct = math.exp(-0.003 * self.rain_rate_mmh) * 100
+            s_text = f"LiDAR: {attn_pct:.0f}% Range"
+            s_color = (255, 200, 100) if attn_pct < 95 else (120, 255, 180)
+        else:
+            s_text = "LiDAR: 100% Range"
+            s_color = (120, 255, 180)
+        
+        w_surf = self._hud_font.render(w_text, True, (0, 230, 255))
+        r_surf = self._hud_font.render(r_text, True, r_color)
+        s_surf = self._hud_font.render(s_text, True, s_color)
+        
+        self.screen.blit(w_surf, (bx + 52, by + 14))
+        self.screen.blit(r_surf, (bx + 52, by + 34))
+        self.screen.blit(s_surf, (bx + 52, by + 54))
+
     def render(self):
-        """Main render pipeline: background, obstacles, goal, rays, drone."""
+        """Main render pipeline: background, obstacles, goal, rays, drone, weather particles, and weather HUD."""
         if self.screen is None:
             return
             
@@ -455,8 +714,14 @@ class DroneSim:
         # 3. LiDAR sensor rays
         self._draw_rays()
         
-        # 4. Quadcopter drone (drawn last, on top)
+        # 4. Quadcopter drone (drawn on top of rays)
         self._draw_drone()
+
+        # 5. Rain weather particles
+        self._draw_rain()
+
+        # 6. Weather telemetry HUD widget
+        self._draw_weather_widget()
 
 if __name__ == "__main__":
     env = DroneSim()

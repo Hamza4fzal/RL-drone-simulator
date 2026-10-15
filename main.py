@@ -178,6 +178,7 @@ def parse_args():
     parser.add_argument("--turbo", action="store_true", help="Start directly in Turbo mode")
     parser.add_argument("--rays", type=int, default=16, help="Number of LiDAR sensor rays covering 360 degrees (default: 16)")
     parser.add_argument("--render-interval", type=int, default=15, help="Render every N steps in Ultra Turbo mode (default: 15)")
+    parser.add_argument("--no-weather", action="store_true", help="Disable wind and rain environmental physics")
     return parser.parse_args()
 
 def main():
@@ -194,8 +195,8 @@ def main():
         render_mode = True
         mode = MODE_NORMAL
 
-    # Initialize Environment with 360-degree LiDAR
-    env = DroneSim(render_mode=render_mode, num_rays=args.rays)
+    # Initialize Environment with 360-degree LiDAR and Realistic Weather Dynamics
+    env = DroneSim(render_mode=render_mode, num_rays=args.rays, enable_weather=not args.no_weather)
     
     # State features = 16 rays + [dist_to_goal, relative_angle, speed] = 19
     state_size = env.num_rays + 3
