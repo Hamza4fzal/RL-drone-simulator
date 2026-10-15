@@ -6,15 +6,13 @@ import argparse
 import numpy as np
 from collections import deque
 from environment import DroneSim, WIDTH, HEIGHT
-from dqn_agent import DQNAgent
+from sac_agent import SACAgent
 
 # Hyperparameters
 MAX_STEPS = 500
 BATCH_SIZE = 64
-EPSILON_START = 1.0
-EPSILON_MIN = 0.01  # Minimum exploration rate (1% random, 99% learned policy)
-EPSILON_DECAY = 0.995
-MODEL_PATH = "drone_memory.pth"
+WARMUP_STEPS = 600           # Initial steps collecting uniform random actions for buffer diversity
+MODEL_PATH = "sac_drone_memory.pth"
 
 # Training Modes
 MODE_NORMAL = "NORMAL"          # 60 FPS cap, standard real-time rendering
@@ -24,16 +22,16 @@ MODE_HEADLESS = "HEADLESS"      # Windowed headless, maximum compute speed (~50x
 
 MODE_CYCLE = [MODE_NORMAL, MODE_TURBO, MODE_ULTRA]
 
-def draw_dashboard(env, font, episode, step, reward, epsilon, mode, steps_per_sec, win_rate):
-    """Draws the UI metrics, speed indicator, and reward/penalty meter."""
+def draw_dashboard(env, font, episode, step, reward, alpha, action, mode, steps_per_sec, win_rate, critic_loss=0.0):
+    """Draws the UI metrics, continuous action readouts, and SAC entropy temperature."""
     if env.screen is None:
         return
 
     # Semi-transparent background for UI
-    ui_width = 280
-    ui_height = 188
+    ui_width = 290
+    ui_height = 205
     ui_surface = pygame.Surface((ui_width, ui_height))
-    ui_surface.set_alpha(220)
+    ui_surface.set_alpha(225)
     ui_surface.fill((16, 18, 26))
     env.screen.blit(ui_surface, (10, 10))
     pygame.draw.rect(env.screen, (55, 68, 95), pygame.Rect(10, 10, ui_width, ui_height), width=1, border_radius=6)
@@ -48,15 +46,18 @@ def draw_dashboard(env, font, episode, step, reward, epsilon, mode, steps_per_se
     mode_color = mode_colors.get(mode, (255, 255, 255))
     
     speed_mult = steps_per_sec / 60.0 if steps_per_sec > 0 else 1.0
+    throttle_val = action[0] if action is not None else 0.0
+    steer_val = action[1] if action is not None else 0.0
     
     metrics = [
+        (f"ALGO: Soft Actor-Critic (SAC)", (255, 205, 80)),
         (f"MODE: {mode}", mode_color),
         (f"Speed: {steps_per_sec:.0f} s/s ({speed_mult:.1f}x)", (150, 255, 150)),
-        (f"Episode: {episode} (Continuous)", (240, 240, 240)),
-        (f"Steps: {step} / {MAX_STEPS}", (240, 240, 240)),
-        (f"Epsilon: {epsilon:.3f}", (240, 240, 240)),
-        (f"Reward: {reward:.1f}", (240, 240, 240)),
-        (f"Win Rate: {win_rate:.0f}% (Recent)", (200, 230, 255))
+        (f"Episode: {episode} | Step: {step}/{MAX_STEPS}", (240, 240, 240)),
+        (f"Entropy Temp (Alpha): {alpha:.4f}", (140, 210, 255)),
+        (f"Action: [Thr: {throttle_val:+.2f}, Str: {steer_val:+.2f}]", (255, 240, 130)),
+        (f"Reward: {reward:.1f} | Loss: {critic_loss:.2f}", (240, 240, 240)),
+        (f"Success Rate: {win_rate:.0f}% (Recent 30)", (200, 230, 255))
     ]
     
     for i, (text, color) in enumerate(metrics):
@@ -64,9 +65,9 @@ def draw_dashboard(env, font, episode, step, reward, epsilon, mode, steps_per_se
         env.screen.blit(surface, (20, 16 + (i * 20)))
 
     # Reward/Penalty Meter Visuals
-    meter_y = 166
-    center_x = 145
-    pygame.draw.line(env.screen, (80, 80, 95), (45, meter_y), (245, meter_y), 4) # Base line
+    meter_y = 186
+    center_x = 150
+    pygame.draw.line(env.screen, (80, 80, 95), (50, meter_y), (250, meter_y), 4) # Base line
     pygame.draw.line(env.screen, (255, 255, 255), (center_x, meter_y - 7), (center_x, meter_y + 7), 2) # Center zero
     
     bar_length = min(abs(reward), 95)
@@ -94,14 +95,14 @@ def draw_controls_bar(env, small_font, tiny_font):
     pygame.draw.rect(env.screen, (55, 70, 100), pygame.Rect(bar_x, bar_y, bar_width, bar_height), width=1, border_radius=6)
     
     # Header
-    title = small_font.render("SIMULATOR CONTROLS & SHORTCUTS", True, (255, 205, 80))
+    title = small_font.render("SAC SIMULATOR CONTROLS & SHORTCUTS", True, (255, 205, 80))
     env.screen.blit(title, (bar_x + 14, bar_y + 7))
     
     shortcuts = [
         ("[T]", "Cycle visual speed modes (NORMAL -> TURBO -> ULTRA TURBO).", (255, 200, 50)),
         ("[H]", "Toggle HEADLESS accelerated mode on and off instantly without freezing the window.", (255, 90, 180)),
         ("[SPACE]", "Pause and resume training.", (100, 240, 255)),
-        ("[S]", "Manually save the model checkpoint to drone_memory.pth.", (130, 255, 130)),
+        ("[S]", "Manually save the SAC policy checkpoint to sac_drone_memory.pth.", (130, 255, 130)),
         ("[Q] / [ESC]", "Save and cleanly exit.", (255, 120, 120))
     ]
     
@@ -113,7 +114,7 @@ def draw_controls_bar(env, small_font, tiny_font):
         env.screen.blit(d_surf, (bar_x + 105, y))
         y += 17
 
-def draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False):
+def draw_headless_screen(env, font, small_font, tiny_font, episode, step, alpha, steps_per_sec, win_rate, paused=False):
     """Draws a high-contrast HUD screen when running in windowed headless mode."""
     if env.screen is None:
         return
@@ -128,16 +129,16 @@ def draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilo
     pygame.draw.rect(env.screen, (20, 24, 34), box_rect, border_radius=12)
     pygame.draw.rect(env.screen, (60, 75, 105), box_rect, width=2, border_radius=12)
     
-    title = font.render("=== HEADLESS ULTRA-SPEED TRAINING ===", True, (255, 200, 80))
-    env.screen.blit(title, (box_rect.x + 55, box_rect.y + 22))
+    title = font.render("=== SAC HEADLESS ULTRA-SPEED TRAINING ===", True, (255, 200, 80))
+    env.screen.blit(title, (box_rect.x + 40, box_rect.y + 22))
     
     metrics = [
         (f"Status: {status_str}", status_color),
         (f"Throughput: {steps_per_sec:.0f} steps/sec ({speed_mult:.1f}x Realtime)", (100, 230, 255)),
-        (f"Current Episode: {episode}", (240, 240, 240)),
-        (f"Step: {step} / {MAX_STEPS}", (240, 240, 240)),
-        (f"Epsilon: {epsilon:.3f}", (240, 240, 240)),
-        (f"Recent Success Rate: {win_rate:.0f}%", (255, 220, 120)),
+        (f"Algorithm: Soft Actor-Critic (Continuous 2D Control)", (255, 220, 120)),
+        (f"Current Episode: {episode} | Step: {step} / {MAX_STEPS}", (240, 240, 240)),
+        (f"Entropy Temperature (Alpha): {alpha:.4f}", (140, 210, 255)),
+        (f"Recent Success Rate: {win_rate:.0f}%", (150, 255, 150)),
     ]
     
     y = box_rect.y + 58
@@ -155,7 +156,7 @@ def draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilo
         ("[T]", "Cycle visual speed modes (NORMAL -> TURBO -> ULTRA TURBO).", (255, 200, 50)),
         ("[H]", "Toggle HEADLESS accelerated mode on and off instantly without freezing the window.", (255, 90, 180)),
         ("[SPACE]", "Pause and resume training.", (100, 240, 255)),
-        ("[S]", "Manually save the model checkpoint to drone_memory.pth.", (130, 255, 130)),
+        ("[S]", "Manually save the SAC policy checkpoint to sac_drone_memory.pth.", (130, 255, 130)),
         ("[Q] / [ESC]", "Save and cleanly exit.", (255, 120, 120))
     ]
     
@@ -169,7 +170,7 @@ def draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilo
     pygame.display.flip()
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="UAV RL Navigation Simulator - DQN Training")
+    parser = argparse.ArgumentParser(description="UAV RL Navigation Simulator - Soft Actor-Critic (SAC)")
     parser.add_argument("--headless", action="store_true", help="Run windowless headless training without GUI display")
     parser.add_argument("--turbo", action="store_true", help="Start directly in Turbo mode")
     parser.add_argument("--rays", type=int, default=16, help="Number of LiDAR sensor rays covering 360 degrees (default: 16)")
@@ -181,7 +182,6 @@ def main():
     
     # Mode selection
     if args.headless:
-        # True windowless headless
         render_mode = False
         mode = MODE_HEADLESS
     elif args.turbo:
@@ -194,18 +194,27 @@ def main():
     # Initialize Environment with 360-degree LiDAR
     env = DroneSim(render_mode=render_mode, num_rays=args.rays)
     
-    state_size = env.num_rays + 2 
-    action_size = 4 
+    # State features = 16 rays + [dist_to_goal, relative_angle, speed] = 19
+    state_size = env.num_rays + 3
+    # Continuous action space: [throttle, steering] in [-1.0, 1.0]
+    action_size = 2 
     
-    agent = DQNAgent(state_size, action_size)
+    # Soft Actor-Critic Agent
+    agent = SACAgent(
+        state_dim=state_size, 
+        action_dim=action_size, 
+        lr=3e-4, 
+        gamma=0.99, 
+        tau=0.005, 
+        auto_entropy=True
+    )
     
     start_episode = 0
     if os.path.exists(MODEL_PATH):
-        start_episode, epsilon = agent.load(MODEL_PATH)
-        print(f"[Memory] Resuming from Episode {start_episode} (Epsilon: {epsilon:.3f})")
+        start_episode = agent.load(MODEL_PATH)
+        print(f"[Memory] Resuming SAC policy from Episode {start_episode} (Alpha: {agent.alpha:.4f})")
     else:
-        print("[Memory] No previous memory found. Starting training from scratch.")
-        epsilon = EPSILON_START
+        print("[Memory] No previous SAC memory found. Starting training from scratch.")
         
     font = None
     small_font = None
@@ -224,10 +233,11 @@ def main():
     last_metric_time = time.time()
     last_metric_steps = 0
     steps_per_sec = 60.0
-    recent_outcomes = deque(maxlen=30) # Stores 1 for goal reach, 0 for crash/timeout
+    recent_outcomes = deque(maxlen=30)
+    current_critic_loss = 0.0
 
     print("==================================================================")
-    print(f" UAV RL Simulator Started | State Size: {state_size} (360° LiDAR)")
+    print(f" UAV SAC Simulator Started | State: {state_size} | Action: {action_size}D Cont.")
     print(" Controls: [T] Cycle Turbo  [H] Headless  [Space] Pause  [S] Save")
     print("==================================================================")
 
@@ -239,6 +249,7 @@ def main():
             state = env.reset()
             total_reward = 0
             episode_success = False
+            last_action = np.zeros(action_size, dtype=np.float32)
             
             for step in range(MAX_STEPS):
                 total_steps += 1
@@ -247,16 +258,15 @@ def main():
                 if render_mode:
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
-                            agent.save(MODEL_PATH, episode, epsilon)
+                            agent.save(MODEL_PATH, episode)
                             pygame.quit()
-                            print(f"[Exit] Checkpoint saved at Episode {episode}. Goodbye!")
+                            print(f"[Exit] SAC Checkpoint saved at Episode {episode}. Goodbye!")
                             return
                         elif event.type == pygame.KEYDOWN:
                             if event.key == pygame.K_SPACE:
                                 paused = not paused
                                 print(f"[Control] Simulation {'PAUSED' if paused else 'RESUMED'}")
                             elif event.key == pygame.K_t:
-                                # Cycle speed modes
                                 if mode == MODE_HEADLESS:
                                     mode = MODE_TURBO
                                 else:
@@ -264,16 +274,15 @@ def main():
                                     mode = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
                                 print(f"[Mode] Switched to {mode}")
                             elif event.key == pygame.K_h:
-                                # Toggle headless mode
                                 mode = MODE_NORMAL if mode == MODE_HEADLESS else MODE_HEADLESS
                                 print(f"[Mode] Headless mode: {'ENABLED' if mode == MODE_HEADLESS else 'DISABLED'}")
                             elif event.key == pygame.K_s:
-                                agent.save(MODEL_PATH, episode, epsilon)
-                                print(f"[Manual Save] Checkpoint saved at Episode {episode}.")
+                                agent.save(MODEL_PATH, episode)
+                                print(f"[Manual Save] SAC Checkpoint saved at Episode {episode}.")
                             elif event.key in (pygame.K_q, pygame.K_ESCAPE):
-                                agent.save(MODEL_PATH, episode, epsilon)
+                                agent.save(MODEL_PATH, episode)
                                 pygame.quit()
-                                print(f"[Exit] Clean exit requested. Model saved at Episode {episode}.")
+                                print(f"[Exit] Clean exit requested. SAC model saved at Episode {episode}.")
                                 return
 
                 # Handle Pause loop
@@ -281,17 +290,18 @@ def main():
                     if render_mode:
                         win_rate = (sum(recent_outcomes) / len(recent_outcomes) * 100) if recent_outcomes else 0
                         if mode == MODE_HEADLESS:
-                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, 
-                                                 win_rate, paused=True)
+                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, agent.alpha, 
+                                                 steps_per_sec, win_rate, paused=True)
                         else:
                             env.render()
-                            draw_dashboard(env, font, episode, step, total_reward, epsilon, "PAUSED", 0, win_rate)
+                            draw_dashboard(env, font, episode, step, total_reward, agent.alpha, last_action, 
+                                           "PAUSED", 0, win_rate, current_critic_loss)
                             draw_controls_bar(env, small_font, tiny_font)
                             pygame.display.flip()
                         
                         for event in pygame.event.get():
                             if event.type == pygame.QUIT:
-                                agent.save(MODEL_PATH, episode, epsilon)
+                                agent.save(MODEL_PATH, episode)
                                 pygame.quit()
                                 return
                             elif event.type == pygame.KEYDOWN:
@@ -299,19 +309,29 @@ def main():
                                     paused = False
                                     print("[Control] Resumed!")
                                 elif event.key in (pygame.K_q, pygame.K_ESCAPE):
-                                    agent.save(MODEL_PATH, episode, epsilon)
+                                    agent.save(MODEL_PATH, episode)
                                     pygame.quit()
                                     return
                         env.clock.tick(15)
                     else:
                         time.sleep(0.1)
 
-                # RL Decision & Environment Step
-                action = agent.act(state, epsilon)
+                # Action selection: Warmup with uniform random actions, then sample from SAC stochastic policy
+                if total_steps < WARMUP_STEPS and start_episode == 0:
+                    action = np.random.uniform(-1.0, 1.0, size=(action_size,)).astype(np.float32)
+                else:
+                    action = agent.select_action(state, evaluate=False)
+
+                last_action = action
                 next_state, reward, done = env.step(action)
                 
+                # Store transition in continuous replay buffer
                 agent.memory.push(state, action, reward, next_state, done)
-                agent.train_step(BATCH_SIZE)
+                
+                # Gradient update step
+                metrics = agent.train_step(BATCH_SIZE)
+                if metrics:
+                    current_critic_loss = metrics["critic_loss"]
                 
                 state = next_state
                 total_reward += reward
@@ -319,7 +339,7 @@ def main():
                 if reward >= 90:
                     episode_success = True
 
-                # Compute dynamic throughput metrics every 0.4 seconds
+                # Dynamic throughput metrics
                 now = time.time()
                 elapsed = now - last_metric_time
                 if elapsed >= 0.4:
@@ -333,31 +353,33 @@ def main():
                     
                     if mode == MODE_NORMAL:
                         env.render()
-                        draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_dashboard(env, font, episode, step, total_reward, agent.alpha, last_action, 
+                                       mode, steps_per_sec, win_rate, current_critic_loss)
                         draw_controls_bar(env, small_font, tiny_font)
                         pygame.display.flip()
-                        env.clock.tick(60) # Capped at 60 FPS
+                        env.clock.tick(60)
                         
                     elif mode == MODE_TURBO:
                         env.render()
-                        draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                        draw_dashboard(env, font, episode, step, total_reward, agent.alpha, last_action, 
+                                       mode, steps_per_sec, win_rate, current_critic_loss)
                         draw_controls_bar(env, small_font, tiny_font)
                         pygame.display.flip()
                         env.clock.tick(0)
                         
                     elif mode == MODE_ULTRA:
-                        # Render only 1 out of every N steps (or at episode end) for massive speedup
                         if step % render_interval == 0 or done:
                             env.render()
-                            draw_dashboard(env, font, episode, step, total_reward, epsilon, mode, steps_per_sec, win_rate)
+                            draw_dashboard(env, font, episode, step, total_reward, agent.alpha, last_action, 
+                                           mode, steps_per_sec, win_rate, current_critic_loss)
                             draw_controls_bar(env, small_font, tiny_font)
                             pygame.display.flip()
                         env.clock.tick(0)
                         
                     elif mode == MODE_HEADLESS:
-                        # Refresh headless HUD screen periodically without ray/obstacle drawing
                         if step % 25 == 0 or done:
-                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, epsilon, steps_per_sec, win_rate, paused=False)
+                            draw_headless_screen(env, font, small_font, tiny_font, episode, step, agent.alpha, 
+                                                 steps_per_sec, win_rate, paused=False)
                         env.clock.tick(0)
 
                 if done:
@@ -368,16 +390,15 @@ def main():
 
             # Automatic checkpoint save every 10 episodes
             if episode % 10 == 0:
-                agent.save(MODEL_PATH, episode, epsilon)
+                agent.save(MODEL_PATH, episode)
                 
-            epsilon = max(EPSILON_MIN, epsilon * EPSILON_DECAY)
             speed_mult = steps_per_sec / 60.0 if steps_per_sec > 0 else 1.0
             print(f"Ep {episode:4d} | Rew: {total_reward:6.1f} | Steps: {step+1:3d} | Win: {win_rate:3.0f}% | "
-                  f"Eps: {epsilon:.3f} | Speed: {steps_per_sec:5.0f} s/s ({speed_mult:4.1f}x) [{mode}]")
+                  f"Alpha: {agent.alpha:.4f} | Speed: {steps_per_sec:5.0f} s/s ({speed_mult:4.1f}x) [{mode}]")
 
     except KeyboardInterrupt:
-        print(f"\n[Interrupt] Training paused by user (Ctrl+C). Saving memory at Episode {current_episode}...")
-        agent.save(MODEL_PATH, current_episode, epsilon)
+        print(f"\n[Interrupt] Training paused by user (Ctrl+C). Saving SAC memory at Episode {current_episode}...")
+        agent.save(MODEL_PATH, current_episode)
         if render_mode:
             pygame.quit()
 

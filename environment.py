@@ -33,14 +33,25 @@ class DroneSim:
         self.reset()
         
     def _generate_obstacles(self):
-        """Generates random rectangular obstacles."""
+        """Generates random rectangular obstacles with guaranteed clearance at spawn and goal."""
         self.obstacles = []
-        for _ in range(6):
-            w = random.randint(50, 150)
-            h = random.randint(50, 150)
-            x = random.randint(100, WIDTH - 100 - w)
-            y = random.randint(100, HEIGHT - 100 - h)
-            self.obstacles.append(pygame.Rect(x, y, w, h))
+        spawn_rect = pygame.Rect(20, (HEIGHT // 2) - 60, 110, 120)
+        goal_rect = pygame.Rect(WIDTH - 130, (HEIGHT // 2) - 60, 110, 120)
+
+        attempts = 0
+        while len(self.obstacles) < 5 and attempts < 100:
+            attempts += 1
+            w = random.randint(60, 130)
+            h = random.randint(60, 130)
+            x = random.randint(110, WIDTH - 110 - w)
+            y = random.randint(80, HEIGHT - 80 - h)
+            obs = pygame.Rect(x, y, w, h)
+            
+            # Avoid placing obstacles directly inside spawn or goal clearance zones
+            if obs.colliderect(spawn_rect) or obs.colliderect(goal_rect):
+                continue
+                
+            self.obstacles.append(obs)
 
     def reset(self):
         """Resets the environment for a new episode."""
@@ -63,22 +74,42 @@ class DroneSim:
         return self._get_state()
         
     def step(self, action):
-        """Takes an action and returns (state, reward, done)."""
+        """
+        Takes an action and returns (state, reward, done).
+        Supports both continuous SAC actions [throttle, steer] in [-1, 1]
+        and legacy discrete integer actions (0, 1, 2, 3).
+        """
         self.frame_count += 1
         
         # 1. Calculate distance before movement
         prev_dist = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
 
-        # Action execution
-        if action == 0:
-            self.speed = min(self.speed + 0.5, self.max_speed)
-        elif action == 1:
-            self.angle -= 0.1
-        elif action == 2:
-            self.angle += 0.1
-        elif action == 3:
-            self.speed = max(self.speed - 0.2, 0)
+        # Handle continuous vs discrete action
+        if isinstance(action, (list, tuple, np.ndarray)):
+            # Continuous action [throttle, steer] in [-1.0, 1.0]
+            throttle = float(np.clip(action[0], -1.0, 1.0))
+            steer = float(np.clip(action[1], -1.0, 1.0))
+
+            # Continuous Throttle: positive accelerates, negative brakes
+            if throttle > 0:
+                self.speed = min(self.speed + throttle * 0.4, self.max_speed)
+            else:
+                self.speed = max(self.speed + throttle * 0.3, 0.0)
+
+            # Continuous Steering: smooth angular turn rate
+            self.angle += steer * 0.12
+        else:
+            # Legacy Discrete action execution (for keyboard testing)
+            if action == 0:
+                self.speed = min(self.speed + 0.5, self.max_speed)
+            elif action == 1:
+                self.angle -= 0.1
+            elif action == 2:
+                self.angle += 0.1
+            elif action == 3:
+                self.speed = max(self.speed - 0.2, 0.0)
             
+        # Update drone position
         self.drone_x += self.speed * math.cos(self.angle)
         self.drone_y += self.speed * math.sin(self.angle)
         
@@ -88,28 +119,37 @@ class DroneSim:
         curr_dist = math.hypot(self.goal_x - self.drone_x, self.goal_y - self.drone_y)
         
         # Base Step Penalty (-0.05) + Reward for moving closer to the goal
-        progress_reward = (prev_dist - curr_dist) * 0.1
+        progress_reward = (prev_dist - curr_dist) * 0.15
         reward = progress_reward - 0.05
         done = False
+
+        # 3. Obstacle Proximity / Danger Zone Penalty (Repulsive field)
+        # Prevents the agent from hugging obstacles and forces safe margins
+        min_sensor = min(self.sensor_distances) if self.sensor_distances else self.max_ray_length
+        danger_threshold = 50.0  # Safe clearance distance in pixels
+        if min_sensor < danger_threshold:
+            # Quadratic penalty that increases sharply as distance approaches 0
+            proximity_penalty = -2.0 * ((danger_threshold - min_sensor) / danger_threshold) ** 2
+            reward += proximity_penalty
         
-        # 3. Wall Collision Penalty (accounting for drone radius 10)
+        # 4. Wall Collision Penalty (accounting for drone radius 10)
         drone_radius = 10
         if (self.drone_x <= drone_radius or self.drone_x >= WIDTH - drone_radius or 
             self.drone_y <= drone_radius or self.drone_y >= HEIGHT - drone_radius):
-            reward = -100
+            reward = -100.0
             done = True
             
-        # 4. Obstacle Collision Penalty (20x20 bounding box)
+        # 5. Obstacle Collision Penalty (20x20 bounding box)
         drone_rect = pygame.Rect(self.drone_x - 10, self.drone_y - 10, 20, 20)
         for obs in self.obstacles:
             if drone_rect.colliderect(obs):
-                reward = -100
+                reward = -100.0
                 done = True
                 break
                 
-        # 5. Goal Reached Reward (distance < radius_goal + radius_drone)
+        # 6. Goal Reached Reward (distance < radius_goal + radius_drone)
         if curr_dist < 25: 
-            reward = 100
+            reward = 150.0
             done = True
             
         return self._get_state(), reward, done
@@ -162,7 +202,14 @@ class DroneSim:
             self.ray_hit_points.append(closest_point)
 
     def _get_state(self):
-        """Returns the current state vector for the RL agent."""
+        """
+        Returns the current state vector for the RL agent.
+        State features (dim = num_rays + 3):
+          - normalized LiDAR distances: [d_0, ..., d_{num_rays-1}] in [0, 1]
+          - normalized distance to goal: dist / WIDTH in [0, 1]
+          - normalized relative heading to goal: angle / pi in [-1, 1]
+          - normalized drone speed: speed / max_speed in [0, 1] (Markov momentum!)
+        """
         # Normalize distances to a 0.0 - 1.0 range for the neural network
         normalized_sensors = [d / self.max_ray_length for d in self.sensor_distances]
         
@@ -174,7 +221,10 @@ class DroneSim:
         # Keep relative angle between -pi and pi
         relative_angle = (relative_angle + math.pi) % (2 * math.pi) - math.pi
         
-        state = normalized_sensors + [dist_to_goal / WIDTH, relative_angle / math.pi]
+        # Speed feature solves the POMDP (partially observable) momentum issue
+        normalized_speed = self.speed / self.max_speed
+
+        state = normalized_sensors + [dist_to_goal / WIDTH, relative_angle / math.pi, normalized_speed]
         return np.array(state, dtype=np.float32)
 
     # =========================================================================
