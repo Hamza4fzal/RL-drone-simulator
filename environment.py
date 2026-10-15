@@ -321,106 +321,95 @@ class DroneSim:
             pygame.draw.circle(self.screen, (255, 200, 200), (x + w - 9, y + 7), 1)
 
     def _draw_drone(self):
-        """Draws a detailed quadcopter with 4 propeller arms, spinning props, body, and LEDs."""
-        cx, cy = self.drone_x, self.drone_y
-        a = self.angle
-        
-        # Drone geometry constants
-        arm_length = 14          # Distance from center to propeller hub
-        prop_radius = 7          # Propeller blade sweep radius
-        body_radius = 5          # Central body radius
-        
-        # Propeller spin animation (faster when speed is higher)
-        spin_speed = 0.3 + self.speed * 0.15
-        prop_phase = self.frame_count * spin_speed
-        
-        # 4 arm directions: front-left, front-right, back-left, back-right (relative to heading)
-        arm_angles = [
-            a + math.pi / 4,      # Front-right
-            a - math.pi / 4,      # Front-left
-            a + 3 * math.pi / 4,  # Back-right
-            a - 3 * math.pi / 4,  # Back-left
+        """Draws a high-visibility Arctic White & Electric Neon quadcopter with illuminated motor pods and spinning blades."""
+        drone = pygame.Surface((100, 100), pygame.SRCALPHA)
+
+        # High-visibility color palette
+        body_white = (245, 250, 255)
+        body_rim = (190, 205, 225)
+        visor_dark = (30, 36, 48)
+        arm_alloy = (205, 215, 230)
+        arm_highlight = (255, 255, 255)
+        motor_housing = (32, 36, 44)
+        motor_cap = (220, 230, 245)
+        blade_neon = (0, 240, 255)       # Electric cyan (bright and distinct)
+        camera_lens = (0, 255, 170)      # High-vis neon mint-green for heading perception
+
+        # Four diagonal reinforced arms (bright alloy with pure white highlight)
+        arms = [
+            ((35, 35), (18, 18)),
+            ((65, 35), (82, 18)),
+            ((35, 65), (18, 82)),
+            ((65, 65), (82, 82))
         ]
-        
-        # LED colors for each motor: front = cyan, rear = red (aviation convention)
-        led_colors = [
-            (0, 220, 255),   # Front-right — cyan
-            (0, 220, 255),   # Front-left  — cyan
-            (255, 50, 50),   # Back-right  — red
-            (255, 50, 50),   # Back-left   — red
+
+        for start, end in arms:
+            pygame.draw.line(drone, arm_alloy, start, end, 5)
+            pygame.draw.line(drone, arm_highlight, start, end, 2)
+
+        # Four motor housings with LEDs and dynamic spinning neon blades
+        motors = [
+            (18, 18, (0, 240, 255)),    # Front-left: cyan LED
+            (82, 18, (0, 240, 255)),    # Front-right: cyan LED
+            (18, 82, (255, 80, 80)),    # Rear-left: red LED
+            (82, 82, (255, 80, 80))     # Rear-right: red LED
         ]
-        
-        # --- Draw Arms ---
-        for i, arm_a in enumerate(arm_angles):
-            hub_x = cx + arm_length * math.cos(arm_a)
-            hub_y = cy + arm_length * math.sin(arm_a)
-            
-            # Arm strut from center to hub
-            pygame.draw.line(self.screen, (90, 95, 110),
-                             (int(cx), int(cy)), (int(hub_x), int(hub_y)), 2)
-            
-            # Propeller hub circle (motor housing)
-            pygame.draw.circle(self.screen, (60, 65, 80), (int(hub_x), int(hub_y)), 4)
-            pygame.draw.circle(self.screen, (100, 110, 130), (int(hub_x), int(hub_y)), 4, 1)
-            
-            # Spinning propeller blades (2 blades per prop, opposite each other)
-            blade_phase = prop_phase + i * 1.3  # Offset each prop for visual variety
-            for blade in range(2):
-                blade_a = blade_phase + blade * math.pi
-                bx1 = hub_x + prop_radius * math.cos(blade_a)
-                by1 = hub_y + prop_radius * math.sin(blade_a)
-                bx2 = hub_x - prop_radius * math.cos(blade_a)
-                by2 = hub_y - prop_radius * math.sin(blade_a)
-                # Blade drawn as a thin line with slight transparency effect
-                pygame.draw.line(self.screen, (140, 160, 190), 
-                                 (int(bx1), int(by1)), (int(bx2), int(by2)), 2)
-            
-            # Propeller disc ghost (semi-transparent circle showing sweep area)
-            disc_surf = pygame.Surface((prop_radius * 2 + 2, prop_radius * 2 + 2), pygame.SRCALPHA)
-            pygame.draw.circle(disc_surf, (100, 180, 255, 25), 
-                               (prop_radius + 1, prop_radius + 1), prop_radius)
-            self.screen.blit(disc_surf, (int(hub_x - prop_radius - 1), int(hub_y - prop_radius - 1)))
-            
-            # LED light on each motor
-            led_glow = abs(math.sin(self.frame_count * 0.12 + i))
-            r, g, b = led_colors[i]
-            glow_r = min(255, int(r * (0.5 + led_glow * 0.5)))
-            glow_g = min(255, int(g * (0.5 + led_glow * 0.5)))
-            glow_b = min(255, int(b * (0.5 + led_glow * 0.5)))
-            pygame.draw.circle(self.screen, (glow_r, glow_g, glow_b), (int(hub_x), int(hub_y)), 2)
-        
-        # --- Central Body ---
-        # Dark inner body
-        pygame.draw.circle(self.screen, (45, 50, 65), (int(cx), int(cy)), body_radius + 2)
-        # Body ring highlight
-        pygame.draw.circle(self.screen, (80, 90, 115), (int(cx), int(cy)), body_radius + 2, 1)
-        # Inner core (camera / sensor dome)
-        pygame.draw.circle(self.screen, (30, 35, 50), (int(cx), int(cy)), body_radius - 1)
-        # Central blue LED
-        blue_pulse = abs(math.sin(self.frame_count * 0.1))
-        center_blue = (int(40 + blue_pulse * 60), int(150 + blue_pulse * 80), 255)
-        pygame.draw.circle(self.screen, center_blue, (int(cx), int(cy)), 2)
-        
-        # --- Heading indicator line (extends forward from body edge) ---
-        head_start_x = cx + (body_radius + 2) * math.cos(a)
-        head_start_y = cy + (body_radius + 2) * math.sin(a)
-        head_end_x = cx + 22 * math.cos(a)
-        head_end_y = cy + 22 * math.sin(a)
-        pygame.draw.line(self.screen, (200, 230, 255), 
-                         (int(head_start_x), int(head_start_y)), 
-                         (int(head_end_x), int(head_end_y)), 2)
-        # Small arrowhead at tip
-        arrow_size = 4
-        left_a = a + math.pi * 0.8
-        right_a = a - math.pi * 0.8
-        pygame.draw.line(self.screen, (200, 230, 255),
-                         (int(head_end_x), int(head_end_y)),
-                         (int(head_end_x + arrow_size * math.cos(left_a)), 
-                          int(head_end_y + arrow_size * math.sin(left_a))), 2)
-        pygame.draw.line(self.screen, (200, 230, 255),
-                         (int(head_end_x), int(head_end_y)),
-                         (int(head_end_x + arrow_size * math.cos(right_a)), 
-                          int(head_end_y + arrow_size * math.sin(right_a))), 2)
+        spin_speed = 0.4 + self.speed * 0.2
+        blade_phase = self.frame_count * spin_speed
+
+        for i, (mx, my, led_color) in enumerate(motors):
+            # Motor pod base
+            pygame.draw.circle(drone, motor_housing, (mx, my), 7)
+            pygame.draw.circle(drone, arm_alloy, (mx, my), 7, 1)
+
+            # Spinning high-vis neon blades
+            angle_offset = blade_phase + i * (math.pi / 2)
+            bx = 13 * math.cos(angle_offset)
+            by = 13 * math.sin(angle_offset)
+
+            # Vibrant propeller blade
+            pygame.draw.line(
+                drone, blade_neon,
+                (int(mx - bx), int(my - by)),
+                (int(mx + bx), int(my + by)), 3
+            )
+            # Propeller core highlight
+            pygame.draw.circle(drone, motor_cap, (mx, my), 3)
+            # Navigation LED beacon on each motor
+            pygame.draw.circle(drone, led_color, (mx, my), 2)
+
+        # Main drone fuselage body (Clean Arctic White)
+        pygame.draw.ellipse(drone, body_white, (33, 33, 34, 34))
+        pygame.draw.ellipse(drone, body_rim, (33, 33, 34, 34), 2)
+
+        # Cockpit canopy / avionics bay
+        pygame.draw.ellipse(drone, visor_dark, (37, 37, 26, 26))
+
+        # Center status beacon
+        pulse = abs(math.sin(self.frame_count * 0.12))
+        core_cyan = (int(0 + pulse * 40), int(210 + pulse * 45), 255)
+        pygame.draw.circle(drone, core_cyan, (50, 50), 4)
+        pygame.draw.circle(drone, (255, 255, 255), (50, 50), 2)
+
+        # Front-facing camera / perception sensor (facing UP in local surface coords)
+        pygame.draw.circle(drone, body_white, (50, 37), 5)
+        pygame.draw.circle(drone, camera_lens, (50, 37), 3)
+        pygame.draw.circle(drone, (255, 255, 255), (50, 36), 1)
+
+        # Heading rotation & scaling (scale increased to 0.48 for crisp visibility)
+        rot_angle = -math.degrees(self.angle) - 90
+        scale = 0.48
+
+        rotated = pygame.transform.rotozoom(drone, rot_angle, scale)
+        rect = rotated.get_rect(center=(int(self.drone_x), int(self.drone_y)))
+
+        # Soft luminous halo around drone for pop against black background
+        halo_radius = int(22 * scale * 2)
+        halo_surf = pygame.Surface((halo_radius * 2, halo_radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(halo_surf, (0, 200, 255, 35), (halo_radius, halo_radius), halo_radius)
+        self.screen.blit(halo_surf, (int(self.drone_x - halo_radius), int(self.drone_y - halo_radius)))
+
+        self.screen.blit(rotated, rect)
 
     def _draw_rays(self):
         """Draws the LiDAR sensor rays with hit point indicators."""
